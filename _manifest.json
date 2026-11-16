@@ -12,14 +12,14 @@
     }
   },
   "author": {
-    "name": "Rabbit-Jia-Er",
-    "url": "https://github.com/Rabbit-Jia-Er"
+    "name": "Yae-Miko-Rabbit",
+    "url": "https://github.com/Yae-Miko-Rabbit"
   },
   "license": "AGPL-3.0-only",
   "urls": {
-    "repository": "https://github.com/Rabbit-Jia-Er/MaiTrace",
-    "homepage": "https://github.com/Rabbit-Jia-Er/MaiTrace",
-    "issues": "https://github.com/Rabbit-Jia-Er/MaiTrace/issues"
+    "repository": "https://github.com/Yae-Miko-Rabbit/MaiTrace",
+    "homepage": "https://github.com/Yae-Miko-Rabbit/MaiTrace",
+    "issues": "https://github.com/Yae-Miko-Rabbit/MaiTrace/issues"
   },
   "host_application": {
     "min_version": "1.3.11",

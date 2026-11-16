@@ -107,7 +107,7 @@ Cookie 默认依次尝试适配器、OneBot HTTP、本机 QQ、扫码和缓存�
 2. 克隆本仓库，指定目录名为 `MaiTrace`：
 
    ```shell
-   git clone https://github.com/Rabbit-Jia-Er/MaiTrace.git MaiTrace
+   git clone https://github.com/Yae-Miko-Rabbit/MaiTrace.git MaiTrace
    ```
 
 3. 主程序负责安装依赖；需要手动安装时，在 MaiBot 使用的 Python 环境中执行：
@@ -599,7 +599,7 @@ result = await self.ctx.call_capability(
 
 ## 贡献和反馈
 
-- **制作者水平有限，任何漏洞、疑问或建议,欢迎提交 [Issue](https://github.com/Rabbit-Jia-Er/MaiTrace/issues) 或 Pull Request！**
+- **制作者水平有限，任何漏洞、疑问或建议,欢迎提交 [Issue](https://github.com/Yae-Miko-Rabbit/MaiTrace/issues) 或 Pull Request！**
 - **作者QQ：3082618311或群1025591815（部分请求可能被过滤导致回复不及时，请见谅）**
 - **其余问题请联系作者修复或解决**
 
@@ -611,7 +611,7 @@ result = await self.ctx.call_capability(
 
 ## 🔗 版权信息
 
-- 作者：Rabbit-Jia-Er
+- 作者：Yae-Miko-Rabbit
 - 许可证：[AGPL-3.0-only](LICENSE)
 - 原有和引用组件的许可保留于 [LICENSES/](LICENSES/)
-- 项目主页：https://github.com/Rabbit-Jia-Er/MaiTrace
+- 项目主页：https://github.com/Yae-Miko-Rabbit/MaiTrace
