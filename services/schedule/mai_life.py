@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 import asyncio
@@ -15,6 +14,7 @@ import time
 
 from ...utils import get_global_str, get_logger
 from . import ScheduleEngine
+from .image import ScheduleImageRow, build_schedule_image_html, load_schedule_background
 from .query import CurrentActivity
 from .snapshot import ActivitySnapshot, ScheduleSnapshotCache
 from .utils.stream_filter import is_stream_allowed
@@ -284,15 +284,28 @@ class MaiLifeScheduleSource(ScheduleEngine):
         if not stream_id:
             raise ValueError('缺少发送日程图片的聊天流')
         bot_name = (await get_global_str(self.plugin.ctx, 'bot.nickname')).strip()
+        now = self.timezone_manager.get_now()
+        style = self.plugin.config.schedule_image
+        background = await load_schedule_background(style.background_path)
         rows = []
-        for item in segments:
+
+        def display_time(moment: datetime) -> str:
+            offset = (moment.date() - now.date()).days
+            prefix = {-1: '昨日', 0: '', 1: '次日'}.get(offset, moment.strftime('%m-%d '))
+            return f'{prefix}{moment:%H:%M}'
+
+        for index, item in enumerate(segments, 1):
             start, end = datetime.fromisoformat(item['start']), datetime.fromisoformat(item['end'])
-            rows.append(f"<tr><td>{start:%H:%M}—{end:%H:%M}</td><td>{escape(item['name'])}</td></tr>")
-        html = ("<!doctype html><html lang='zh-CN'><meta charset='utf-8'>"
-                "<style>body{padding:28px;background:#f7f3ea;font-family:'Microsoft YaHei',sans-serif}"
-                "table{width:100%;border-collapse:collapse}td{padding:14px;border-bottom:1px solid #ddd}</style>"
-                f"<h1>{escape(bot_name)}的一天</h1><p>{self.timezone_manager.get_now():%Y-%m-%d} · Mai_life</p>"
-                f"<table>{''.join(rows)}</table></html>")
+            if now < start:
+                label, state = '待开始', 'upcoming'
+            elif now >= end:
+                label, state = '时段结束', 'finished'
+            else:
+                label, state = '进行中', 'ongoing'
+            description = item.get('description', '') if self.plugin.config.schedule.enable_detailed_description else ''
+            rows.append(ScheduleImageRow(index, f'{display_time(start)}—{display_time(end)}',
+                                         item['name'], description, label, state))
+        html = build_schedule_image_html(bot_name, now.date(), rows, style, background=background)
         result = await self.plugin.ctx.render.html2png(html, viewport={'width': 900, 'height': 600},
             full_page=True, allow_network=False, render_timeout_ms=20000)
         if not isinstance(result, dict) or result.get('success') is False or not result.get('image_base64'):

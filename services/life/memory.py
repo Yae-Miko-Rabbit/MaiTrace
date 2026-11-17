@@ -79,10 +79,15 @@ class MemoryService:
         scenes = await self.store.scenes_for_day(day)
         dreams = await self.store.memories("dream", day=day)
         counts = await self.store.interaction_counts(start.timestamp(), (start + timedelta(days=1)).timestamp())
-        if not scenes and not dreams and not counts["total"]:
+        experiences = await self.store.experiences(day=day, limit=30) if self.config.outcomes_enabled else []
+        outcomes = [{key: item[key] for key in ('activity', 'source', 'status', 'result', 'continuation')}
+                    for item in experiences if not item['target_stream_id'] and item['status'] in {'completed', 'unfinished'}]
+        if not scenes and not dreams and not counts["total"] and not outcomes:
             return
-        source = {"day": day, "scenes": scenes, "dreams": [item["payload"] for item in dreams], "anonymous_interactions": counts}
-        prompt = ("只用以下自身场景、梦境和匿名互动数量写第一人称抽象生活日记。"
+        source = {"day": day, "scenes": scenes, 'activity_results': outcomes,
+                  "dreams": [item["payload"] for item in dreams], "anonymous_interactions": counts}
+        prompt = ("只用以下自身场景、活动结果、梦境和匿名互动数量写第一人称抽象生活日记。"
+                  "保留活动结果的来源与未完成状态，不把模拟结果写成用户已确认的事实。"
                   "不得猜测聊天内容、人物姓名或群号；未知内容不补写。"
                   "返回 JSON：title、content、mood_summary。日记正文不超过1000字。\n"
                   + json.dumps(source, ensure_ascii=False))

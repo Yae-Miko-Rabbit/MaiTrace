@@ -15,7 +15,7 @@ from .models import LifeState, clean_text, material_payload, stable_id
 
 
 T = TypeVar("T")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 # 退役模块只留历史；旧定时任务在 v6 使用 external 来源和 scheduled: 键。
 _ACTIVE_MATERIAL_SQL = (
     "source NOT IN ('creation','manual_creation','external_reading','news','exploration','social','scheduled','scheduled_post') "
@@ -74,7 +74,7 @@ class LifeStore:
         connection.execute("PRAGMA busy_timeout=5000")
         connection.execute("PRAGMA foreign_keys=ON")
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in (0, SCHEMA_VERSION):
+        if version not in (0, 1, SCHEMA_VERSION):
             raise RuntimeError(f"生活数据库版本不兼容：{version}，当前支持 {SCHEMA_VERSION}")
         # 沿用 v6 的表和归档字段，移除功能不删除作品、搜索或关系数值历史。
         connection.executescript("""
@@ -122,6 +122,10 @@ class LifeStore:
             CREATE TABLE IF NOT EXISTS search_history(id TEXT PRIMARY KEY, operation TEXT NOT NULL,
                 query TEXT NOT NULL, provider TEXT NOT NULL, success INTEGER NOT NULL,
                 payload TEXT NOT NULL, created_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS experiences(id TEXT PRIMARY KEY, goal_id TEXT NOT NULL,
+                day TEXT NOT NULL, target_stream_id TEXT NOT NULL, source TEXT NOT NULL,
+                status TEXT NOT NULL, payload TEXT NOT NULL, updated_at REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS idx_experience_pending ON experiences(status,updated_at);
         """)
         with connection:
             connection.execute("INSERT OR IGNORE INTO state(id,payload) VALUES(1,?)", (_json(state.to_dict()),))
@@ -160,7 +164,8 @@ class LifeStore:
         await self._run(save)
 
     async def commit_state(self, state: LifeState, applied: List[str], *,
-                           wakes: Optional[List[Dict[str, Any]]] = None, day: str = "") -> None:
+                           wakes: Optional[List[Dict[str, Any]]] = None, day: str = "",
+                           experiences: Optional[List[Dict[str, Any]]] = None) -> None:
         """状态与场景完成标记在同一事务提交，重启不会重复吃饭或结算精力。"""
         def commit() -> None:
             with self.connection:
@@ -171,7 +176,61 @@ class LifeStore:
                     self.connection.execute("INSERT OR IGNORE INTO memories VALUES(?,?,?,?,?,?,?)", (
                         stable_id("wake", str(wake["sleep_started_at"])), "wake_event", day, "private", "",
                         _json(wake), state.last_updated_at))
+                for record in experiences or []:
+                    self._insert_experience(record)
         await self._run(commit)
+
+    def _insert_experience(self, record: Dict[str, Any]) -> None:
+        self.connection.execute('INSERT OR IGNORE INTO experiences VALUES(?,?,?,?,?,?,?,?)', (
+            record['id'], record['goal_id'], record['day'], record['target_stream_id'],
+            record['source'], record['status'], _json(record), record['updated_at']))
+
+    async def add_experience(self, record: Dict[str, Any]) -> None:
+        def write() -> None:
+            with self.connection:
+                self._insert_experience(record)
+        await self._run(write)
+
+    async def recent_public_shares(self, now: float) -> List[Dict[str, Any]]:
+        return await self._run(lambda: [self._opportunity(row) for row in self.connection.execute(
+            "SELECT * FROM opportunities WHERE privacy='public' AND consumer='qzone' AND status='consumed' "
+            'AND confirmed_at>? ORDER BY confirmed_at DESC LIMIT 10', (now - 86400,))])
+
+    async def experiences(self, *, stream_id: str = '', status: str = '', day: str = '',
+                          limit: int = 10) -> List[Dict[str, Any]]:
+        def read() -> List[Dict[str, Any]]:
+            clauses, args = ["(target_stream_id='' OR target_stream_id=?)"], [stream_id]
+            for field, value in (('status', status), ('day', day)):
+                if value:
+                    clauses.append(f'{field}=?')
+                    args.append(value)
+            args.append(max(1, min(100, limit)))
+            return [json.loads(row[0]) for row in self.connection.execute(
+                'SELECT payload FROM experiences WHERE ' + ' AND '.join(clauses) + ' ORDER BY updated_at DESC LIMIT ?', args)]
+        return await self._run(read)
+
+    async def get_experience(self, record_id: str, stream_id: str) -> Optional[Dict[str, Any]]:
+        def read() -> Optional[Dict[str, Any]]:
+            row = self.connection.execute("SELECT payload FROM experiences WHERE id=? AND (target_stream_id='' OR target_stream_id=?)",
+                                          (record_id, stream_id)).fetchone()
+            return json.loads(row[0]) if row else None
+        return await self._run(read)
+
+    async def save_experience(self, record: Dict[str, Any], *, opportunity: Optional[Dict[str, Any]] = None,
+                              resolved: Optional[Dict[str, Any]] = None) -> None:
+        prepared = self._prepare_opportunity(**opportunity) if opportunity else None
+        def write() -> None:
+            with self.connection:
+                self.connection.execute('INSERT INTO experiences VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET '
+                    'source=excluded.source,status=excluded.status,payload=excluded.payload,updated_at=excluded.updated_at',
+                    (record['id'], record['goal_id'], record['day'], record['target_stream_id'],
+                     record['source'], record['status'], _json(record), record['updated_at']))
+                if prepared is not None:
+                    self._insert_opportunity(prepared)
+                if resolved is not None:
+                    self.connection.execute('UPDATE experiences SET status=?,payload=?,updated_at=? WHERE id=?',
+                        (resolved['status'], _json(resolved), resolved['updated_at'], resolved['id']))
+        await self._run(write)
 
     async def applied_segments(self, keys: List[str]) -> List[str]:
         if not keys:
@@ -216,6 +275,12 @@ class LifeStore:
     async def scenes_for_day(self, day: str) -> List[Dict[str, Any]]:
         return await self._run(lambda: [dict(row) for row in self.connection.execute(
             "SELECT description,scene FROM scenes WHERE day=? ORDER BY created_at", (day,))])
+
+    async def recent_scenes(self, now: float, *, exclude_key: str = '', limit: int = 8) -> List[Dict[str, Any]]:
+        """只读取近期自身场景，供模型承接背景并识别反复使用的细节。"""
+        return await self._run(lambda: [dict(row) for row in self.connection.execute(
+            'SELECT description,scene FROM scenes WHERE created_at>=? AND created_at<=? AND key<>? '
+            'ORDER BY created_at DESC LIMIT ?', (now - 7 * 86400, now, exclude_key, max(1, min(20, limit))))])
 
     @staticmethod
     def _prepare_opportunity(*, source: str, source_key: str, topic: str, motive: str,

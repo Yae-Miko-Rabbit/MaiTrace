@@ -131,7 +131,15 @@ class SchemaBuilder:
                             },
                             "parameters": {
                                 "type": "object",
-                                "description": "额外参数"
+                                "description": "额外参数",
+                                "properties": {
+                                    "care_actions": {
+                                        "type": "array",
+                                        "items": {"type": "string", "enum": ["drink", "wash"]},
+                                        "uniqueItems": True,
+                                        "description": "本活动实际包含的补水或洗漱动作，完成后结算一次",
+                                    }
+                                },
                             },
                             "conditions": {
                                 "type": "object",

@@ -22,6 +22,7 @@ _HELP_TEXT = (
     "/zn custom          - 用 custom QQ 的私聊内容发说说\n"
     "/zn plan [子命令]   - 每日作息与临时约定\n"
     "/zn status          - 当前生活状态\n"
+    "/zn life recent     - 活动结果与待接续事项（当前会话）\n"
     "/zn life diary      - 查看私人生活日记（主人私聊）\n"
     "/zn dates [操作]    - 本人重要日期与待确认日期\n"
     "/zn config          - 生活功能开关摘要\n"

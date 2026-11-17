@@ -78,7 +78,8 @@ async def build_send_prompt(
 
     if qzone_api is not None and plugin.config.send.history_number > 0:
         history_num = plugin.config.send.history_number
-        prompt += "\n以下是你以前发过的说说，写新说说时注意不要在相隔不长的时间发送相同主题的说说\n"
+        prompt += ("\n以下是你以前发过的说说。熟悉的兴趣可以继续分享，但这次要有具体的新内容或进展；"
+                   "避免仅换措辞重说同一件事，也不要反复使用相同开头、结尾和感悟。沿用人设的表达习惯，平淡时自然简短。\n")
         try:
             prompt += wrap_untrusted(await qzone_api.get_send_history(history_num), label="历史说说", max_chars=8000)
         except Exception as exc:

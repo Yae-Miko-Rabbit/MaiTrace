@@ -72,6 +72,29 @@ class ScheduleContextLoader:
         """
         return self.load_recent_schedule_summary(days=1)
 
+    def load_recent_schedule_records(self, days: int = 3, chat_id: str = "global") -> List[Dict[str, Any]]:
+        """读取判重用结构化历史；只取过去已保存的活动，私人约定和已取消项目不参与比较。"""
+        now = self.tz_manager.get_now()
+        history = []
+        for offset in range(1, max(1, min(14, int(days))) + 1):
+            day = (now - timedelta(days=offset)).date().isoformat()
+            items = []
+            for goal in self.goal_manager.get_schedule_goals(chat_id=chat_id, date_str=day):
+                window = self._extract_time_window(goal)
+                if (goal.status.value not in {"active", "completed"} or goal.parameters.get("commitment_stream_id")
+                        or not isinstance(window, (list, tuple)) or len(window) != 2):
+                    continue
+                begin, end = int(window[0]), int(window[1])
+                items.append({
+                    "name": goal.name, "description": goal.description, "goal_type": goal.goal_type,
+                    "time_slot": f"{begin // 60:02d}:{begin % 60:02d}", "duration_hours": (end - begin) / 60,
+                    "parameters": {"is_commitment": bool(goal.parameters.get("is_commitment"))},
+                })
+            if items:
+                items.sort(key=lambda item: item["time_slot"])
+                history.append({"day": day, "items": items})
+        return history
+
     def load_recent_schedule_summary(self, days: int = 3) -> Optional[str]:
         """加载最近 N 天的日程摘要，用于承接近期状态并避免机械重复。
 

@@ -14,6 +14,7 @@ from .planner.goal_manager import Goal, GoalStatus
 from .planner.role_judge import judge_schedule_request
 from .planner.schedule_generator import Schedule, ScheduleGenerator
 from .privacy import goal_for_stream
+from .utils.time_utils import format_minutes_to_time
 from .utils.timezone_manager import TimezoneManager
 
 if TYPE_CHECKING:
@@ -148,13 +149,9 @@ class ToolsService:
                 else:
                     completed.append((goal, tw))
 
-            def _fmt_time(minutes: int) -> str:
-                h, m = minutes // 60, minutes % 60
-                return f"{h:02d}:{m:02d}"
-
             def _fmt_item(goal: Any, tw: List[int], emoji: str = "") -> str:
-                start_time = _fmt_time(tw[0])
-                end_time = _fmt_time(tw[1])
+                start_time = format_minutes_to_time(tw[0])
+                end_time = format_minutes_to_time(tw[1])
                 desc = ""
                 if enable_detailed_description:
                     desc = goal.description

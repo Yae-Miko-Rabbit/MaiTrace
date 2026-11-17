@@ -53,6 +53,16 @@ class LifeCommands:
         parts = text.split(None, 1)
         command = parts[0].lower()
         param = parts[1].strip() if len(parts) > 1 else ""
+        if command == 'life' and param in {'recent', '经历'}:
+            try:
+                engine._check_experience_scope(stream_id, user_id, kwargs)
+            except ValueError as exc:
+                return _result(str(exc), success=False)
+            rows = (await engine.query_experiences(stream_id=stream_id, user_id=user_id, **kwargs))['data']
+            labels = {'pending': '待整理', 'awaiting_confirmation': '等待本人确认', 'completed': '完成', 'unfinished': '未完成'}
+            sources = {'simulated': '自身模拟', 'reported': '用户陈述'}
+            return _result('\n\n'.join(f"{row['id']} · {row['activity']} · {labels[row['status']]}（{sources[row['source']]}）\n"
+                f"{row['result'] or '仅确认日程时段结束'}" + (f"\n待接续：{row['continuation']}" if row['continuation'] else '') for row in rows) or '还没有活动结果', rows)
         if command in {"status", "life"} and param not in {"diary", "日记"}:
             state = engine.peek_state()
             message = (f"当前活动：{state.get('current_activity') or '暂无日程'}\n"
@@ -60,6 +70,14 @@ class LifeCommands:
                        f"精力 {float(state.get('energy', 0)):.1f} / 饥饿 {float(state.get('hunger', 0)):.1f}\n"
                        f"心情 {float(state.get('mood_valence', 0)):+.2f} / 睡眠阶段 {state.get('sleep_phase', '未知')}\n"
                        f"身体状态：{state.get('health_note', '未知')}")
+            if state.get('provider') == 'internal' and 'thirst' in state:
+                message += (f"\n口渴 {state['thirst']:.1f} / 身体疲劳 {state['fatigue']:.1f}"
+                            f" / 困意 {state['sleep_pressure']:.1f}\n"
+                            f"洗漱需要 {state['hygiene_need']:.1f} / 不适 {state['discomfort']:.1f}"
+                            f" / 恢复状态 {state['recovery_status']}")
+                if state.get('menstrual_phase') not in {'disabled', 'waiting'}:
+                    labels = {'period': '经期', 'recovery': '经后恢复', 'premenstrual': '经前', 'ordinary': '平常阶段'}
+                    message += f"\n周期：{labels[state['menstrual_phase']]}，第 {state['menstrual_cycle_day']} 天"
             if state["errors"]:
                 message += "\n待处理模块：" + "、".join(state["errors"])
             return _result(message, state)
@@ -83,7 +101,7 @@ class LifeCommands:
                 return _result("还没有生活日记", [])
             diary = items[0]["payload"]
             return _result(f"{items[0]['day']} · {diary['title']}\n{diary['content']}", diary)
-        return _result("未知生活子命令。可用 status / life diary / dates / config。", success=False)
+        return _result("未知生活子命令。可用 status / life recent / life diary / dates / config。", success=False)
 
     async def _dates(self, param: str, user_id: str) -> Dict[str, Any]:
         parts = param.split(None, 1)

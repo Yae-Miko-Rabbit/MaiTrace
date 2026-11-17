@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import asyncio
 import collections
 import datetime
+import json
 import random
 import time
 import traceback
@@ -316,21 +317,25 @@ class RoutineRunner:
             "- 正在专注做事（工作 / 学习 / 会议 / 写代码 / 审阅）\n"
             "- 正在用餐、洗澡、运动、化妆等需要专注或不方便看手机的活动\n"
             "- 正在睡觉，或刚睡醒还没清醒\n"
-            "- 时间太深夜（22:00 后到次日 8:00）\n"
+            "- 当前处于配置的静默时段或实际睡眠状态\n"
             "- 当前活动与'低头看手机/打字发消息'明显冲突\n"
-            "- 最近刚做过同类事（哪怕没明确告诉你）\n\n"
+            "- 近期已经分享过相同内容，而且没有新的进展\n\n"
             "【才可以的情况】\n"
             "- 当前是放松 / 休息 / 闲逛 / 通勤 / 闲聊等碎片时间\n"
-            "- 时间是白天或晚上 8-10 点等正常社交活跃时段\n"
+            "- 当前时间和实际状态允许自然地看看手机\n"
             "- 你确实有想分享的内容或被好奇心驱动\n\n"
-            "绝大多数情况下应该回答'否'——能回答'否'就回答'否'。\n\n"
+            "分享时判断素材是否有具体的新发现、感受或进展；只有空泛日常或重复话题时回答'否'。\n\n"
             f"{format_hint}"
         )
         if opportunity is not None:
             prompt += wrap_untrusted(
-                f"主题：{opportunity['topic']}\n动机：{opportunity.get('motive', '')}",
+                f"主题：{opportunity['topic']}\n动机：{opportunity.get('motive', '')}\n"
+                f"来源：{opportunity.get('source', '')}\n分享价值：{opportunity.get('weight', 0)}\n"
+                f"最近分享：{json.dumps(opportunity.get('recent_shares', []), ensure_ascii=False)}",
                 label="本轮可公开分享的生活素材", max_chars=2000,
             )
+            prompt += '\n相近话题只有出现具体的新进展才值得再分享，不能换个说法重复发布。'
+            prompt += '熟悉的活动可以反复发生，平淡日常可以留在生活里，不必每次都发说说或总结感悟。'
 
         runner = LLMRunner(
             self.plugin.ctx,
@@ -409,6 +414,9 @@ class RoutineRunner:
         life = self.plugin.life_engine
         if life is None:
             return
+        saved = await life.store.get_value('routine.last_post')
+        if saved:
+            self.last_post_time = max(self.last_post_time, float(saved['at']))
         # 冷却和作息先筛选；无具体公开素材时不调用决策模型，也不空编近况。
         if time.time() - self.last_post_time < self.plugin.config.routine.post_cooldown_minutes * 60:
             self._record_decision(
@@ -433,6 +441,14 @@ class RoutineRunner:
                 claim = await life.claim_public_opportunity(consumer="qzone", lease_seconds=lease)
             if claim is None:
                 return
+            recent = await life.store.recent_public_shares(time.time())
+            normalize = lambda text: ''.join(character.casefold() for character in str(text) if character.isalnum())
+            if any(normalize(item['topic']) == normalize(claim['topic']) for item in recent):
+                failure = '这个主题在过去一天已经分享过，等待新的进展'
+                self._record_decision(action='post', activity=activity, llm_answer='', reason=failure,
+                                      decision=False, cooldown_skipped=False)
+                return
+            claim['recent_shares'] = [{'topic': item['topic'], 'motive': item['motive']} for item in recent[:5]]
             if not await self._llm_decide(activity, "post", opportunity=claim):
                 return
             completed, failure = await self._post_feed(activity, opportunity=claim, publication=publication)
@@ -459,6 +475,9 @@ class RoutineRunner:
                     logger.error("素材发布结果待核对，已停止自动重发: %s", claim["id"])
                 elif not completed:
                     await life.release(claim["claim_token"], error=failure)
+            if completed or publication.uncertain:
+                self.last_post_time = time.time()
+                await life.store.set_value('routine.last_post', {'at': self.last_post_time})
 
     async def _post_feed(
         self, activity: ActivityInfo, *, opportunity: Optional[Dict[str, Any]] = None,

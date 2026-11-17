@@ -14,6 +14,7 @@ from .messaging import MessagingController
 from .routine import RoutineRunner
 from .schedule import ScheduleEngine
 from .schedule.mai_life import MaiLifeScheduleSource
+from .schedule.adaptive import AdaptiveSchedule
 
 
 async def resolve_injection_streams(plugin: Any) -> None:
@@ -49,17 +50,19 @@ async def resolve_injection_streams(plugin: Any) -> None:
 async def coordinate(plugin: Any) -> None:
     """统一驱动快照、生活推进和原规划主动能力；注入不做这些工作。"""
     scopes_refreshed = 0.0
+    adaptive = AdaptiveSchedule(plugin)
     while True:
         try:
             await plugin._schedule_engine.refresh()
             if plugin._life_engine is not None:
                 snapshot = plugin._schedule_engine.current_activity_payload()
-                if not plugin.config.schedule.enabled or not snapshot.get("error"):
+                if plugin.config.life.provider != 'internal' or not plugin.config.schedule.enabled or not snapshot.get("error"):
                     await plugin._life_engine.advance(snapshot)
                 plugin._schedule_engine.update_life_state(plugin._life_engine.peek_state(),
                     managed_private_streams=plugin._life_engine.managed_private_streams())
             else:
                 plugin._schedule_engine.update_life_state({})
+            await adaptive.patrol()
             await plugin._schedule_engine.patrol_proactive()
             if plugin._injection is not None and time.monotonic() - scopes_refreshed >= 300:
                 await resolve_injection_streams(plugin)
@@ -89,7 +92,7 @@ async def start_runtime(plugin: Any) -> None:
             )
             await plugin._life_engine.start()
             snapshot = plugin._schedule_engine.current_activity_payload()
-            if not plugin.config.schedule.enabled or not snapshot.get("error"):
+            if plugin.config.life.provider != 'internal' or not plugin.config.schedule.enabled or not snapshot.get("error"):
                 await plugin._life_engine.advance(snapshot)
             plugin._schedule_engine.update_life_state(plugin._life_engine.peek_state(),
                 managed_private_streams=plugin._life_engine.managed_private_streams())

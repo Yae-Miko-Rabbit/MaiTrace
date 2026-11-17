@@ -1,12 +1,12 @@
 """/zn plan 的日程管理入口，只管理每日生活作息与约定，日程图片复用主程序渲染。"""
 
 from datetime import date, datetime, timedelta
-from html import escape
 from typing import TYPE_CHECKING, Any, List, Tuple
 import logging
 
 from ..services.schedule.utils.stream_filter import is_stream_allowed
 from ..services.schedule.utils.time_utils import format_minutes_to_time, parse_time_window
+from ..services.schedule.image import ScheduleImageRow, build_schedule_image_html, load_schedule_background
 from ..services.schedule.planner.goal_manager import GoalStatus
 from ..services.schedule.privacy import goal_for_stream
 from ..utils import get_global_str
@@ -127,28 +127,27 @@ class PlanningHandler:
             return False, "缺少发送日程图片的聊天流", True
         now = self._engine.timezone_manager.get_now()
         bot_name = (await get_global_str(self._plugin.ctx, "bot.nickname")).strip()
+        style = self._plugin.config.schedule_image
+        background = await load_schedule_background(style.background_path)
+        current_minutes = now.hour * 60 + now.minute
         rows = []
         for index, goal in enumerate(goals, 1):
             goal = goal_for_stream(goal, stream_id)
             start, end = self._window(goal)
             time_text = f"{format_minutes_to_time(start)}—{format_minutes_to_time(end)}"
             description = goal.description if self._plugin.config.schedule.enable_detailed_description else ""
-            rows.append(
-                f"<tr><td>{index}</td><td>{escape(time_text)}</td>"
-                f"<td><strong>{escape(goal.name)}</strong><p>{escape(description)}</p></td>"
-                f"<td>{_STATUS_LABELS[goal.status]}</td></tr>"
-            )
+            label = _STATUS_LABELS[goal.status]
+            state = 'finished' if goal.status == GoalStatus.COMPLETED else 'paused'
+            if goal.status == GoalStatus.ACTIVE:
+                if current_minutes < start:
+                    label, state = '待开始', 'upcoming'
+                elif current_minutes >= end:
+                    label, state = '时段结束', 'finished'
+                else:
+                    state = 'ongoing'
+            rows.append(ScheduleImageRow(index, time_text, goal.name, description, label, state))
         # BOT 名称、日程和描述仅作为文本插入，不允许模型或用户数据构成 HTML/脚本。
-        html = (
-            "<!doctype html><html lang='zh-CN'><meta charset='utf-8'>"
-            "<style>body{margin:0;padding:28px;background:#f7f3ea;color:#283c36;"
-            "font-family:'Microsoft YaHei',sans-serif}main{padding:24px;background:white;border-radius:18px}"
-            "table{width:100%;border-collapse:collapse}td{padding:14px 10px;border-top:1px solid #e3e9e5}"
-            "td:nth-child(2){white-space:nowrap}p{margin:6px 0;color:#5c6b63;font-size:14px;line-height:1.6}"
-            "h1{font-size:24px;margin:0 0 8px}small{display:block;margin-bottom:24px;color:#66786c}</style>"
-            f"<body><main><h1>{escape(bot_name)}的一天</h1><small>{now:%Y-%m-%d} · 共 {len(goals)} 个活动</small>"
-            f"<table>{''.join(rows)}</table></main></body></html>"
-        )
+        html = build_schedule_image_html(bot_name, now.date(), rows, style, background=background)
         result = await self._plugin.ctx.render.html2png(
             html, viewport={"width": 900, "height": 600}, full_page=True,
             allow_network=False, render_timeout_ms=20000,

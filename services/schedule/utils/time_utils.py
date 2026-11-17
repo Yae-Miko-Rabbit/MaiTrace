@@ -58,14 +58,15 @@ def time_slot_to_minutes(time_slot: str) -> Optional[int]:
 
 def format_minutes_to_time(minutes: int) -> str:
     """
-    将分钟数格式化为 HH:MM 字符串
+    将分钟数格式化为展示时间，跨夜时明确标注次日。
 
     Args:
         minutes: 从00:00开始的分钟数
 
     Returns:
-        格式化的时间字符串，如 "09:30"
+        格式化的时间字符串，如 "09:30"、"次日08:30"。
     """
-    hour = minutes // 60
-    minute = minutes % 60
-    return f"{hour:02d}:{minute:02d}"
+    day_offset, within_day = divmod(minutes, 1440)
+    hour, minute = divmod(within_day, 60)
+    prefix = "次日" if day_offset == 1 else f"第{day_offset + 1}天" if day_offset > 1 else ""
+    return f"{prefix}{hour:02d}:{minute:02d}"

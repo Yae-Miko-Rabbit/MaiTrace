@@ -126,7 +126,7 @@ class MessagingController:
 
     def _rest_decision(self, text: str) -> Tuple[bool, bool]:
         config = self.plugin.config.messaging
-        if not config.rest_gate_enabled or self.life is None:
+        if not config.rest_gate_enabled or self.life is None or self.plugin.config.life.provider != 'internal':
             return True, False
         state = self.life.peek_state()
         if state.get("activity_kind") not in {"sleep", "rest"}:

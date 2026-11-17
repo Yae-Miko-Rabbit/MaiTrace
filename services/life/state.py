@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, List, Set, Tuple
+from datetime import datetime, tzinfo
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .models import LifeState, activity_kind, clean_text, stable_id
+from .config import MenstrualSection
+from .physiology import advance_body, complete_care, health_summary, update_cycle
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -21,13 +23,21 @@ class LifeStateEngine:
 
     @staticmethod
     def _span(state: LifeState, start: float, end: float, kind: str,
-              wakes: List[Dict[str, Any]]) -> None:
+              wakes: List[Dict[str, Any]], menstrual: Optional[MenstrualSection] = None,
+              timezone: Optional[tzinfo] = None) -> None:
         if end < start:
             raise ValueError("生活状态区间结束早于开始")
-        if kind == "sleep" and start < state.awake_grace_until < end:
-            LifeStateEngine._span(state, start, state.awake_grace_until, kind, wakes)
-            LifeStateEngine._span(state, state.awake_grace_until, end, kind, wakes)
+        # 长区间按真实时间细分，跨午夜的周期变化和不适恢复同样参与离线回放。
+        boundary = (int(start // 900) + 1) * 900
+        if boundary < end:
+            LifeStateEngine._span(state, start, boundary, kind, wakes, menstrual, timezone)
+            LifeStateEngine._span(state, boundary, end, kind, wakes, menstrual, timezone)
             return
+        if kind == "sleep" and start < state.awake_grace_until < end:
+            LifeStateEngine._span(state, start, state.awake_grace_until, kind, wakes, menstrual, timezone)
+            LifeStateEngine._span(state, state.awake_grace_until, end, kind, wakes, menstrual, timezone)
+            return
+        update_cycle(state, datetime.fromtimestamp(start, tz=timezone), menstrual)
         sleeping = kind == "sleep" and start >= state.awake_grace_until
         previously_sleeping = state.sleep_phase in {"falling_asleep", "light_sleep", "deep_sleep"}
         hours = (end - start) / 3600.0
@@ -46,10 +56,12 @@ class LifeStateEngine:
                     wakes.append({"sleep_started_at": state.sleep_started_at, "woke_at": start,
                                   "hours": duration, "activity": state.current_activity})
             state.sleep_phase = "woken" if start < state.awake_grace_until else "awake"
-            load = {"work": 2.1, "study": 1.8, "travel": 1.4, "rest": 0.3, "meal": 0.5}.get(kind, 1.0)
-            state.energy = _clamp(state.energy - load * hours, 0, 100)
+            load = {"work": 2.1, "study": 1.8, "travel": 1.4, "rest": 0.3, "meal": 0.5,
+                    "exercise": 5, "chores": 2.4}.get(kind, 1.0)
+            state.energy = _clamp(state.energy + (3 if kind == 'rest' else -load) * hours, 0, 100)
             state.hunger = _clamp(state.hunger + 5 * hours, 0, 100)
             state.mood_arousal = _clamp(state.mood_arousal + 0.05 * hours, 0, 1)
+        advance_body(state, hours, kind, sleeping)
         mood_delta = (-0.03 if state.energy < 30 else 0.01 if state.energy > 70 else 0.0) * hours
         if state.hunger > 75:
             mood_delta -= 0.04 * hours
@@ -57,7 +69,8 @@ class LifeStateEngine:
         state.last_updated_at = end
 
     def advance(self, state: LifeState, now: datetime, segments: List[Dict[str, Any]],
-                current: Dict[str, Any], applied: Set[str], *, offline_hours: int = 72
+                current: Dict[str, Any], applied: Set[str], *, offline_hours: int = 72,
+                menstrual: Optional[MenstrualSection] = None
                 ) -> Tuple[LifeState, List[str], List[Dict[str, Any]]]:
         now_ts = now.timestamp()
         if state.last_updated_at > now_ts:
@@ -68,17 +81,20 @@ class LifeStateEngine:
         cutoff = now_ts - offline_hours * 3600
         if state.sleep_started_at and state.sleep_started_at < cutoff:
             state.sleep_started_at = cutoff
+        def span(start: float, end: float, kind: str) -> None:
+            self._span(state, start, end, kind, wakes, menstrual, now.tzinfo)
+
         for segment in sorted(segments, key=lambda item: item["start"]):
             start, end = segment["start"].timestamp(), segment["end"].timestamp()
             if end <= cursor or start >= now_ts:
                 continue
             # 日程空白只推进基本代谢，不能把后来生成的活动套到整段离线时间上。
             if start > cursor:
-                self._span(state, cursor, min(start, now_ts), "other", wakes)
+                span(cursor, min(start, now_ts), "other")
                 cursor = start
-            kind = activity_kind(str(segment["goal_type"]), str(segment["description"]))
+            kind = activity_kind(str(segment["goal_type"]), str(segment["description"]), str(segment["name"]))
             state.current_activity = clean_text(segment["description"] or segment["name"], 500)
-            self._span(state, cursor, min(end, now_ts), kind, wakes)
+            span(cursor, min(end, now_ts), kind)
             cursor = min(end, now_ts)
             key = self.segment_key(segment)
             if end <= now_ts and key not in applied:
@@ -86,12 +102,13 @@ class LifeStateEngine:
                     state.hunger = _clamp(state.hunger - 35, 0, 100)
                 elif kind == "leisure":
                     state.mood_valence = _clamp(state.mood_valence + 0.03, -1, 1)
+                complete_care(state, kind, segment.get("parameters", {}))
                 completions.append(key)
         if cursor < now_ts:
-            self._span(state, cursor, now_ts, "other", wakes)
+            span(cursor, now_ts, "other")
         description = clean_text(current.get("description", current.get("name", "")), 500)
-        kind = activity_kind(str(current.get("goal_type", "")), description)
-        self._span(state, now_ts, now_ts, kind, wakes)
+        kind = activity_kind(str(current.get("goal_type", "")), description, str(current.get("name", "")))
+        span(now_ts, now_ts, kind)
         state.current_activity = description
         state.activity_kind = kind
         parameters = current.get("parameters", {})
@@ -99,10 +116,5 @@ class LifeStateEngine:
         if location:
             state.current_location = clean_text(location, 120)
         state.last_updated_at = now_ts
-        if state.energy < 20:
-            state.health_status, state.health_note = "tired", "精力很低，需要休息"
-        elif state.hunger > 88:
-            state.health_status, state.health_note = "mild_discomfort", "有些饿，需要进餐"
-        else:
-            state.health_status, state.health_note = "normal", "状态正常"
+        health_summary(state)
         return state, completions, wakes

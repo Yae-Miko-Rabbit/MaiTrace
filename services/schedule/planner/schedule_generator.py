@@ -31,6 +31,7 @@ from ..core.models import Schedule, ScheduleItem, ScheduleType
 from ..core.parameter_validator import ParameterValidator
 from ..llm import generate_text
 from ..utils.llm_logger import log_llm_call
+from ..utils.time_utils import format_minutes_to_time
 from ..utils.timezone_manager import TimezoneManager
 from .generator import (
     BaseScheduleGenerator,
@@ -40,6 +41,7 @@ from .generator import (
     ScheduleSemanticValidator,
 )
 from .goal_manager import GoalManager
+from .generator.repetition import ScheduleRepetitionChecker
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +102,8 @@ class ScheduleGenerator:
 
         # 🆕 使用语义验证器
         self.validator = ScheduleSemanticValidator()
+        self.repetition_checker = ScheduleRepetitionChecker()
+        self._repetition_history: List[Dict[str, Any]] = []
 
         logger.debug(f"ScheduleGenerator初始化完成: {self.config}")
 
@@ -191,6 +195,9 @@ class ScheduleGenerator:
         self.base_generator.yesterday_schedule_summary = await self._run_db(
             self.base_generator.context_loader.load_recent_schedule_summary, days=recent_days
         )
+        self._repetition_history = await self._run_db(
+            self.base_generator.context_loader.load_recent_schedule_records, days=recent_days, chat_id=chat_id,
+        ) if self.config._raw_config.get("repetition_check_enabled", True) else []
 
         # 加载今日 pending_commitments 作为上下文
         today_str = self.tz_manager.get_now().strftime("%Y-%m-%d")
@@ -519,9 +526,8 @@ class ScheduleGenerator:
                 # 使用 duration_hours 计算结束时间
                 if item.duration_hours:
                     total_minutes = start_hour * 60 + start_minute + round(item.duration_hours * 60)
-                    end_hour = total_minutes // 60
-                    end_minute = total_minutes % 60
-                    time_range = f"{start_hour:02d}:{start_minute:02d}-{end_hour:02d}:{end_minute:02d}"
+                    end_time = format_minutes_to_time(total_minutes)
+                    time_range = f"{start_hour:02d}:{start_minute:02d}-{end_time}"
                 else:
                     time_range = item.time_slot
 
@@ -629,6 +635,11 @@ class ScheduleGenerator:
                 if overlaps:
                     logger.warning("第%d轮存在时间重叠，将反馈模型重试: %s", round_num, overlaps)
                     continue
+                repetition = await self._check_repetition(validated_items)
+                if repetition:
+                    validation_warnings = repetition + validation_warnings
+                    logger.warning("第%d轮存在跨日机械重复，将反馈模型重试: %s", round_num, repetition)
+                    continue
                 score = self.quality_scorer.calculate_score(validated_items, warnings)
 
                 logger.debug(f"📊 第{round_num}轮质量分数: {score:.2f}")
@@ -655,6 +666,7 @@ class ScheduleGenerator:
             except Exception as e:
                 # 业务可重试错误（响应解析失败 / Schema 校验失败等）
                 logger.warning(f"第{round_num}轮生成失败: {e}")
+                validation_warnings = [str(e), *validation_warnings][:5]
                 continue
 
         if best_schedule is None:
@@ -693,6 +705,9 @@ class ScheduleGenerator:
         overlaps = self.validator.check_time_overlaps(validated_items)
         if overlaps:
             raise ScheduleGenerationError("日程存在时间重叠：" + "; ".join(overlaps[:3]))
+        repetition = await self._check_repetition(validated_items)
+        if repetition:
+            raise ScheduleGenerationError("日程未通过跨日重复检查：" + "; ".join(repetition[:3]))
 
         if warnings:
             logger.warning(f"语义验证发现 {len(warnings)} 个问题")
@@ -718,7 +733,38 @@ class ScheduleGenerator:
             LLMError: LLM 调用失败
         """
         # 获取任务名 + 参数（v4：task_name 字符串，不再是 model_config 对象）
-        task_name, max_tokens, temperature = self.base_generator.get_model_config()
+        _, max_tokens, temperature = self.base_generator.get_model_config()
+        response = await self._request_text(prompt, call_type="schedule_generation",
+                                            max_tokens=max_tokens, temperature=temperature)
+        # 🆕 使用ResponseParser解析（消除重复代码）
+        return self.response_parser.parse_schedule_response(response)
+
+    async def _check_repetition(self, items: List[Dict[str, Any]]) -> List[str]:
+        if not self.config._raw_config.get("repetition_check_enabled", True) or not self._repetition_history:
+            return []
+        candidates = await asyncio.to_thread(self.repetition_checker.candidates, items, self._repetition_history)
+        if not candidates:
+            return []
+        raw = self.config._raw_config
+        context = {
+            "persona": raw.get("bot_profile", {}),
+            "life": raw.get("life_context", {}),
+            "requirements": self.base_generator.prompt_builder.config.get("custom_prompt", ""),
+            "recent_chat": self.base_generator.history_context[:4000],
+            "memory": self.base_generator.knowledge_context[:2000],
+        }
+        prompt = self.repetition_checker.build_review_prompt(items, candidates, context)
+        response = await self._request_text(prompt, call_type="schedule_repetition_review",
+                                            max_tokens=4096, temperature=0.2)
+        _, warnings = self.repetition_checker.feedback(response, items, candidates)
+        logger.info("跨日内容复核：参考日期 %s，结果 %s",
+                    [day["day"] for day in candidates], "需要调整" if warnings else "合理延续")
+        return warnings
+
+    async def _request_text(self, prompt: str, *, call_type: str, max_tokens: int,
+                            temperature: float) -> str:
+        """生成和复核共用真实 SDK、异常分类和单次模型截止时间。"""
+        task_name, _, _ = self.base_generator.get_model_config()
 
         # v4：必须通过插件 ctx.llm 调用，未注入 plugin 视为编程错误
         if self._plugin is None:
@@ -736,7 +782,7 @@ class ScheduleGenerator:
 
         # 归档 LLM 调用（受配置开关控制；失败静默）
         await asyncio.to_thread(
-            self._archive_llm_call, "schedule_generation", prompt, response, task_name, success
+            self._archive_llm_call, call_type, prompt, response, task_name, success
         )
 
         if not success:
@@ -754,10 +800,7 @@ class ScheduleGenerator:
 
             raise LLMError(f"LLM调用失败: {response}")
 
-        # 🆕 使用ResponseParser解析（消除重复代码）
-        items = self.response_parser.parse_schedule_response(response)
-
-        return items
+        return response
 
     def _archive_llm_call(
         self,

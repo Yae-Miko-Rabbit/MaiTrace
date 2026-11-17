@@ -156,7 +156,13 @@ class PromptBuilder:
         if life_context:
             prompt += "\n【当前真实生活状态】\n" + wrap_untrusted(
                 json.dumps(life_context, ensure_ascii=False), label="生活状态参考", max_chars=1800,
-            ) + "\n按真实精力、饥饿、心情和所在地安排后续活动；状态只会随生活自然变化，不能为了剧情忽然变好。\n"
+            ) + ("\n身体数值 0–100：energy 越高越有精力；hunger/thirst/fatigue/sleep_pressure/hygiene_need/discomfort 越高越需要照顾。"
+                 "它们会跨天保留，按当前精力、饥饿、口渴、疲劳、困意、洗漱需要、不适恢复和所在地安排后续活动。"
+                 "状态只会随实际活动和时间变化，不能为了剧情忽然变好；缺失的身体字段不推断成疾病。"
+                 "困意明显时保障足够睡眠，疲劳或恢复期降低长时间学习和剧烈运动的负荷；补水、洗漱可与其他起居合并。"
+                 "月经仅以明确启用的状态为依据，period 表示经期、recovery 表示过渡恢复、premenstrual 表示经前；"
+                 "disabled/waiting 不编造经期。按不适程度安排照护，不强制痛经、低落或整日卧床。"
+                 "合理接续未完成事项，但不得把身体需要挤掉；保留结果来源，不把待确认约定当成已经完成。\n")
 
         # 跨群历史背景（动态上下文）
         if history_context:
@@ -215,32 +221,34 @@ class PromptBuilder:
 - 连续性：依据近期日程的名称和描述，承接当前地点、正在进行的项目、未完成事件和多日安排；结束或切换应有明确依据或合理过渡
 - 人设中的身份、兴趣和偏好不等于当前所在地或实际安排，不要据此无缘由重置近期生活状态
 - 用户明确的新要求可以改变安排；固定要求优先于自动推断和历史参考
-- 作息框架（睡眠 / 三餐 / 起床 / 睡前）保持合理和相对稳定，具体起止可随精力、节假日和已接受约定小幅变化
-- 真实的人 ≠ 日程机器：同一作息框架下，每天的"做什么"与"心情"应有微变化
-- 例：早餐准备熟悉的食物，疲惫时做简单一点；未读完的书接着读，已有项目推进一小步
-- ⚠️ 不要为了"特色"突破常识作息（凌晨跑步、跳过晚餐、午餐推到 16 点都不可以）
-- ⚠️ 不要为了"和昨天不同"而把作息打乱（睡觉时间、三餐时段必须正常）
+- 熟悉的兴趣、生活习惯和持续项目可以重复，起止时间依据近期实际安排、身体状态和已接受约定确定
+- 兴趣只是可用时间里的选择依据，不能占满全天；先满足身体需要、已接受约定和确有依据的日常责任，再安排爱好
+- 日常也包括不那么喜欢却需要处理的事务：备餐、收拾、洗衣、采购或生活杂事；按近期完成情况与实际需要安排，不强制每天做一套家务清单
+- 刚完成的采购或洗衣没有新需要就不重复；积压的事务可以拆开做，疲惫时选择简单做法或把非急事延后
+- 工作、上课、照护和缴费等具体责任必须有人设或记录支持，不凭空编造职业、学校、家庭成员、账单或疾病
+- 允许平淡的一天，也可以保留常做的爱好；变化来自身体需要、事务是否到期和项目进度，不靠每天换新兴趣或随机事故
+- 例：该洗的衣服先处理，剩下时间再接着读书；身体仍在恢复时缩短外出，不把休息写成瞬间痊愈
+- 保留必要的饮食和休息，承接昨夜延续的睡眠；不要为了与昨天不同而打乱已有习惯和地点
 
 1. {min_activities}-{max_activities}个活动，有合理睡眠和主要生活安排；机动空档为真实可用时间，不用自由活动占满
 {desc_requirement}
 3. 严格遵守开头的角色人设：身份、习惯、所处世界观要贯穿全天（不要泛化成"普通女大学生"）
-4. 兴趣偏好：{interest if interest else "日常生活"}
+4. 可用时间的兴趣参考：{interest if interest else "依据人设选择"}；它不代表全天必须只做这些事
 5. description 字段的语气贴合开头的表达风格（reply_style）；活动 name 保持简短中性
    - 留下一两个可感知的小细节（手边的东西、做法、犹豫或期待），不过度可爱，不把所有活动写得开心
    - parameters 可填写 location（简短地点）、outfit（当天衣着）、scene_hint（场景线索）；只写人设和近期记录支持的细节
+   - 起居活动实际包含喝水或洗漱时，parameters.care_actions 可填 ["drink"]、["wash"] 或两者；只是想到或打算以后做时不填写
+   - 短时补水可合并进餐、洗漱或休息，避免把每次喝水拆成占用半小时的大活动；活动名称说明主要动作
    - 跨活动保持地点与衣着连续，换地方要留出出行时间；不在自己独处的活动里编造真实聊天对象参与
-6. **今日特色（在作息框架内做微变化）**：至少 2 个活动名/描述体现今天独有的细节
-   - ✅ 把"上午活动"具化成今天具体在做什么（例：审稿、回邮件、写专栏、整理藏书）
-   - ✅ 与【最近聊天背景】呼应（例：朋友提到的事 → 反映到 description 或 name 中）
-   - ✅ description 写出角色此刻的感受或期待，后续小插曲只能写成可能，不伪造已经发生的事实
-   - ❌ 不要每天叫"上午学习""下午学习""夜聊"这种通用名
-   - ❌ 不要为求新意突破作息（凌晨活动、跳过用餐、深夜跑步都不允许）
-   - ❌ "今日特色"≠ 改变作息时段，是同一时段填不同的具体内容{(
+6. **自然延续**：活动名称可以沿用，描述说明这次打算推进的内容，不靠改名或换同义词制造变化
+   - 有近期进度时接着做，例如继续上次未读完的章节；已完成的步骤不从头再安排
+   - 最近聊天只在与兴趣和安排有关时影响生活，不要求每条聊天都变成日程
+   - 没有新的记录就保留熟悉的习惯，不额外编造新人物、情绪波折或独有细节{(
     '''
 7. **在连续安排内避免机械重复**：保留必要的作息与持续项目，通过具体进展、内容和心情体现变化
    - 持续项目可以沿用名称，在 description 中写清今天打算推进什么
    - 不要为了活动名不同而中断多日安排、擅自返程或更换地点
-   - ⚠️ 不是换作息时段：早餐还是早餐时段，但内容可以不同'''
+   - 进展缓慢、临时暂停或再次做同样的事都正常，说明安排依据即可'''
     if has_real_yesterday else ""
 )}
 """
@@ -251,29 +259,17 @@ class PromptBuilder:
 
         prompt += """
 【活动类型】
-daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_maintenance(社交)|exercise(运动)|learn_topic(兴趣)|custom(其他)
+daily_routine(作息/洗漱)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_maintenance(社交)|exercise(运动)|learn_topic(兴趣)|rest(休息)|custom(家务/其他)
 
 ⚠️ **重要：meal类型活动命名规范**
 - 活动名称必须直接使用：早餐、午餐、晚餐
 - 禁止使用：准备xx、零食时间、下午茶等变体
 - 时间要求：早餐06:00-09:00，午餐11:00-14:00，晚餐17:00-20:00
 
-【JSON格式示例】（展示合理衔接和机动空档，细节按人设重新生成）
+【JSON结构示例】（只演示字段，活动、时间和地点都不是默认安排；完整日程依据已有记录生成）
 {
   "schedule_items": [
-    {"name":"睡觉","description":""" + ('"安静躺下休息，给明天留一点精力"' if enable_detailed_description else '""') + ""","goal_type":"daily_routine","priority":"high","time_slot":"00:00","duration_hours":7.5},
-    {"name":"起床洗漱","description":""" + ('"迷迷糊糊爬起来刷牙洗脸"' if enable_detailed_description else '""') + ""","goal_type":"daily_routine","priority":"medium","time_slot":"07:30","duration_hours":0.5},
-    {"name":"早餐","description":""" + ('"准备一顿简单早餐，慢慢吃一点东西"' if enable_detailed_description else '""') + ""","goal_type":"meal","priority":"high","time_slot":"08:00","duration_hours":0.5},
-    {"name":"整理阅读笔记","description":""" + ('"接着昨天读到的章节整理疑问和笔记"' if enable_detailed_description else '""') + ""","goal_type":"study","priority":"high","time_slot":"08:30","duration_hours":3.0,"parameters":{"location":"书桌边","scene_hint":"翻到上次夹书签的位置"}},
-    {"name":"午餐","description":""" + ('"打算做一道熟悉的菜，顺便歇歇脑子"' if enable_detailed_description else '""') + ""","goal_type":"meal","priority":"high","time_slot":"12:00","duration_hours":0.5},
-    {"name":"午休","description":""" + ('"小憩一会儿恢复精力"' if enable_detailed_description else '""') + ""","goal_type":"daily_routine","priority":"medium","time_slot":"12:30","duration_hours":0.5},
-    {"name":"推进手头项目","description":""" + ('"承接近期进度，处理还未完成的小任务"' if enable_detailed_description else '""') + ""","goal_type":"study","priority":"high","time_slot":"13:00","duration_hours":2.0},
-    {"name":"兴趣活动","description":""" + ('"做自己喜欢的事情，给手头的小作品补一点细节"' if enable_detailed_description else '""') + ""","goal_type":"learn_topic","priority":"medium","time_slot":"15:30","duration_hours":1.5},
-    {"name":"运动","description":""" + ('"出去跑步锻炼身体"' if enable_detailed_description else '""') + ""","goal_type":"exercise","priority":"medium","time_slot":"17:00","duration_hours":1.0},
-    {"name":"晚餐","description":""" + ('"坐下来慢慢吃晚饭，看看今天想吃什么"' if enable_detailed_description else '""') + ""","goal_type":"meal","priority":"high","time_slot":"18:00","duration_hours":0.5},
-    {"name":"娱乐","description":""" + ('"挑一段喜欢的视频，窝着放松一下"' if enable_detailed_description else '""') + ""","goal_type":"entertainment","priority":"low","time_slot":"19:00","duration_hours":2.5},
-    {"name":"夜聊","description":""" + ('"和朋友聊天分享日常"' if enable_detailed_description else '""') + ""","goal_type":"social_maintenance","priority":"medium","time_slot":"21:30","duration_hours":1.0},
-    {"name":"睡前准备","description":""" + ('"洗澡护肤准备睡觉"' if enable_detailed_description else '""') + ""","goal_type":"daily_routine","priority":"medium","time_slot":"22:30","duration_hours":1.5}
+    {"name":"处理待办","description":""" + ('"处理近期记录中还没有完成的一件小事"' if enable_detailed_description else '""') + ""","goal_type":"custom","priority":"medium","time_slot":"10:00","duration_hours":0.5}
 """
 
         prompt += f"""
@@ -281,7 +277,7 @@ daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_ma
 }}
 （根据实际情况生成{min_activities}-{max_activities}个活动）
 
-示例中的 11:30-12:00、15:00-15:30、18:30-19:00 是未安排的机动时间，可用于当天临时约定。
+示例只包含一项以演示结构，不代表全天安排；间隔中的时间没有被活动占用。
 活动可以首尾相接，也可以留空档；不要把空档自动填成占用全天的自由活动。
 
 ⚠️ duration_hours 是活动持续时长（小时），不是重复间隔！
@@ -294,18 +290,10 @@ daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_ma
 【时间合理性要求 - 重要！】
 ⚠️ 必须同时满足以下两点：
 1. 有序且不重叠：每个活动结束时间 ≤ 下个活动开始时间，保留适量机动空档
-2. 遵守常识性时间安排，参考以下时间框架：
-   • 00:00-07:00  睡觉 (7-8小时)
-   • 07:00-08:00  起床/洗漱
-   • 08:00-08:30  早餐 ← 必须在 06:00-09:00
-   • 08:30-12:00  上午活动（学习/工作/娱乐）
-   • 12:00-13:00  午餐+午休 ← 午餐必须在 11:00-14:00
-   • 13:00-18:00  下午活动（可细分为2-3个不同活动，避免单个活动超过3小时）
-   • 18:00-19:00  晚餐+休息 ← 晚餐必须在 17:00-20:00
-   • 19:00-22:00  晚间活动（娱乐/社交/兴趣）
-   • 22:00-00:00  睡前准备+早睡，疲惫时适当提前
-
-⚠️ 注意：下午和晚间的大时段应该细分成多个活动，不要一个活动占据5小时以上！
+2. 依据近期日程、已接受约定和当前身体状态安排饮食、休息与主要活动；没有记录时按人设生成合理安排
+   • 昨夜的睡眠尚未结束时先承接它，不在凌晨另外安排重复睡眠
+   • 持续项目可连续安排，疲惫、饥饿或已有约定会影响时长和顺序
+   • 空闲时可以保留空档，不必每天按相同顺序安排学习、运动、娱乐和夜聊
 
 【要求】
 - 严格JSON格式，无注释
@@ -315,7 +303,7 @@ daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_ma
   * 计算方式：结束时间 = time_slot + duration_hours
   * 示例：活动 A 在 15:00 结束，活动 B 可从 15:30 开始，空出的半小时不算已占用
 - ⚠️ 关键活动时间必须合理：早餐6-9点、午餐11-14点、晚餐17-20点、睡觉从22-2点开始
-""" + ("- description填空字符串\"\"即可\n" if not enable_detailed_description else f"- description简洁，{min_desc_len}-{max_desc_len}字\n") + f"""- 体现{weekday}特色（{"周末睡懒觉" if is_weekend else "工作日早起"}）
+""" + ("- description填空字符串\"\"即可\n" if not enable_detailed_description else f"- description简洁，{min_desc_len}-{max_desc_len}字\n") + f"""- 今天是{weekday}；是否影响安排以角色习惯和已有记录为准，不机械套用工作日早起或周末睡懒觉
 """
 
         # 添加Schema约束（精简版）

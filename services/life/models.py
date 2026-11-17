@@ -61,6 +61,10 @@ def material_payload(source: str, privacy: str, payload: Optional[Dict[str, Any]
         raise ValueError("公开作品或公开群话题需要明确的公开范围")
     result["classification"] = classification
     result["instruction"] = MATERIAL_INSTRUCTIONS[classification]
+    if source == 'activity_result' and result.get('source') == 'simulated':
+        result['instruction'] += '这是自身日程的模拟活动结果；保留未完成状态，不声称用户参与或确认了结果。'
+        if result.get('status') == 'unfinished':
+            result['instruction'] += '这项活动尚未完成，只分享已有进展，不说成已经做完。'
     return result
 
 
@@ -122,20 +126,34 @@ async def generate_object(generator: TextGenerator, prompt: str, *, max_tokens: 
     return json_object(text)
 
 
-def activity_kind(goal_type: str, description: str) -> str:
-    value = f"{goal_type} {description}".lower()
+def activity_kind(goal_type: str, description: str, name: str = "") -> str:
+    # 明确类型和活动标题优先，避免“睡眠不足，继续学习”被当作睡觉。
+    explicit = {
+        "sleep": "sleep", "nap": "sleep", "meal": "meal", "work": "work",
+        "study": "study", "learn_topic": "study", "exercise": "exercise",
+        "travel": "travel", "rest": "rest", "leisure": "leisure",
+        "entertainment": "leisure", "hydration": "hydration", "hygiene": "hygiene",
+        "chores": "chores",
+    }
+    if goal_type.lower() in explicit:
+        return explicit[goal_type.lower()]
     groups = (
         ("sleep", ("sleep", "nap", "睡", "午休", "小憩", "入眠")),
         ("meal", ("meal", "eat", "早餐", "午餐", "午饭", "晚餐", "晚饭", "吃饭")),
         ("work", ("work", "工作", "办公", "会议")),
         ("study", ("study", "学习", "读书", "阅读")),
         ("travel", ("travel", "commut", "通勤", "出行")),
+        ("hygiene", ("hygiene", "洗漱", "洗澡", "淋浴", "刷牙")),
+        ("hydration", ("hydration", "喝水", "饮水", "补水")),
+        ("exercise", ("exercise", "运动", "跑步", "健身")),
+        ("chores", ("chores", "打扫", "洗衣", "家务", "采购", "买菜", "做饭")),
         ("rest", ("rest", "休息")),
         ("leisure", ("leisure", "relax", "放松", "娱乐", "散步")),
     )
-    for kind, words in groups:
-        if any(word in value for word in words):
-            return kind
+    for value in (name.lower(), description.lower(), goal_type.lower()):
+        for kind, words in groups:
+            if any(word in value for word in words):
+                return kind
     return "other"
 
 
@@ -158,6 +176,15 @@ def normalize_snapshot(snapshot: Any) -> Dict[str, Any]:
 class LifeState:
     energy: float = 70.0
     hunger: float = 20.0
+    thirst: float = 20.0
+    fatigue: float = 15.0
+    sleep_pressure: float = 20.0
+    hygiene_need: float = 15.0
+    discomfort: float = 0.0
+    recovery_status: str = "well"
+    menstrual_phase: str = "disabled"
+    menstrual_cycle_day: int = 0
+    menstrual_discomfort: float = 0.0
     mood_valence: float = 0.0
     mood_arousal: float = 0.5
     health_status: str = "normal"

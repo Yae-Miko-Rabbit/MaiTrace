@@ -114,12 +114,67 @@ class ImportantDate(PluginConfigBase):
         return sorted(set(values), reverse=True)
 
 
+class MenstrualSection(PluginConfigBase):
+    """角色自身的可选周期模拟；不从性别、用户消息或模型输出推断启用。"""
+
+    __ui_label__: ClassVar[str] = '角色月经周期'
+    __ui_icon__: ClassVar[str] = 'moon'
+    __ui_order__: ClassVar[int] = 61
+
+    enabled: bool = Field(
+        default=False, description='仅适用角色启用月经周期模拟；需填写起始日期，只在内置生活状态模式生效。',
+        json_schema_extra={'label': '启用角色月经周期', 'group': '周期', 'order': 1},
+    )
+    last_period_start: str = Field(
+        default="", description='一次已知经期首日 YYYY-MM-DD，按日程时区；作为持续模拟的基准，重启或跨天不重置。',
+        json_schema_extra={'label': '经期起始日期', 'group': '周期', 'order': 2},
+    )
+    cycle_days: int = Field(
+        default=28, ge=21, le=40, description='模拟周期长度（天），21–40；可按角色设定调整，不用于预测真实人的月经。',
+        json_schema_extra={'label': '周期长度（天）', 'group': '周期', 'order': 3},
+    )
+    period_days: int = Field(
+        default=5, ge=2, le=8, description='模拟经期长度（天），2–8；结束后两天过渡恢复。',
+        json_schema_extra={'label': '经期长度（天）', 'group': '周期', 'order': 4},
+    )
+    symptom_level: float = Field(
+        default=30.0, ge=0, le=100, description='模拟经期不适的峰值，0–100；0 表示无明显不适，不强制疼痛或情绪变化。',
+        json_schema_extra={'label': '经期不适程度', 'group': '周期', 'order': 5},
+    )
+
+    @field_validator("last_period_start")
+    @classmethod
+    def validate_start(cls, value: str) -> str:
+        from datetime import date
+        if value:
+            if date.fromisoformat(value).isoformat() != value:
+                raise ValueError("经期起始日期必须为 YYYY-MM-DD")
+        return value
+
+    @model_validator(mode="after")
+    def validate_enabled(self) -> "MenstrualSection":
+        if self.enabled and not self.last_period_start:
+            raise ValueError("启用月经周期时必须提供经期起始日期")
+        return self
+
+
 class LifeSection(PluginConfigBase):
     """消费已有日程推进生活，生成场景、梦境、私人日记与素材；主动私聊使用独立用户许可和发送额度。"""
 
     __ui_label__: ClassVar[str] = '生活状态与私聊'
     __ui_icon__: ClassVar[str] = "heart-pulse"
     __ui_order__: ClassVar[int] = 60
+
+    provider: Literal['internal', 'maibot-community.mai-life'] = Field(
+        default='internal',
+        description='生活状态来源。内置模式自行推进；麦生活模式读取其公开状态和场景，不重复计算数值、生成场景或控制唤醒，需同时选择麦生活日程。',
+        json_schema_extra={'label': '生活状态来源', 'group': '生活状态', 'order': 0},
+    )
+    outcomes_enabled: bool = Field(
+        default=True,
+        description='记录活动结束后的结果和未完成事项。自身日程可生成明确标注的模拟经历；共同约定等待所在会话确认。',
+        json_schema_extra={'label': '活动结果与接续', 'group': '生活素材', 'order': 6},
+    )
 
     enabled: bool = Field(
         default=True,

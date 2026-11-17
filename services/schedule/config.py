@@ -1,6 +1,6 @@
 """MaiTrace 内置日程的生成、裁判、注入和清理配置。
 
-配置模型由根配置以 schedule / inject / goal_cleanup 三个独立 section 挂载。
+配置模型由根配置以 schedule / schedule_image / inject / goal_cleanup 独立 section 挂载。
 只声明模板字段，不读取、搬迁或重写其他插件的实际配置。
 """
 
@@ -36,8 +36,37 @@ class GoalCleanupSection(PluginConfigBase):
 
 
 # ============================================================
-# [schedule]：日程与约定，字段显示顺序由各自的 order 控制。
+# [schedule_image] / [schedule]：日程图片与日程约定，字段显示顺序由各自的 order 控制。
 # ============================================================
+
+
+class ScheduleImageSection(PluginConfigBase):
+    """日程图片的本地背景和半透明卡片。"""
+
+    __ui_label__: ClassVar[str] = '日程图片'
+    __ui_icon__: ClassVar[str] = 'image'
+    __ui_order__: ClassVar[int] = 31
+
+    background_path: str = Field(
+        default="",
+        description='日程图片背景的本地路径，支持 PNG/JPEG/WebP；相对路径以 MaiTrace 插件目录为基准。留空使用默认底色，不下载网络图片。',
+        json_schema_extra={'label': '背景图片路径', 'hint': '支持绝对路径或相对插件目录的路径，如 assets/background.jpg；留空使用默认底色。', 'placeholder': 'assets/background.jpg', 'order': 1},
+    )
+    background_fit: Literal['cover', 'contain'] = Field(
+        default='cover',
+        description='cover 铺满整张日程并裁切边缘；contain 完整显示背景图，空余部分保留默认底色。图片不拉伸、不重复。',
+        json_schema_extra={'label': '背景适配方式', 'hint': 'cover 铺满并裁切；contain 完整显示。日程较长时建议使用竖图。', 'order': 2},
+    )
+    background_position: Literal['top', 'center', 'bottom'] = Field(
+        default='top',
+        description='背景图垂直对齐位置，水平保持居中；top 顶部、center 居中、bottom 底部。',
+        json_schema_extra={'label': '背景位置', 'order': 3},
+    )
+    card_opacity: float = Field(
+        default=0.90, ge=0.6, le=1.0,
+        description='浅色日程卡片的不透明度，0.6–1；数值越大文字越清晰，越小越能看见背景。',
+        json_schema_extra={'label': '卡片不透明度', 'hint': '默认 0.90；背景颜色复杂时建议提高，1 为完全不透明。', 'order': 4, 'step': 0.05},
+    )
 
 
 class ScheduleSection(PluginConfigBase):
@@ -46,6 +75,17 @@ class ScheduleSection(PluginConfigBase):
     __ui_label__: ClassVar[str] = '日程与约定'
     __ui_icon__: ClassVar[str] = "calendar"
     __ui_order__: ClassVar[int] = 30
+
+    adaptive_enabled: bool = Field(
+        default=True,
+        description='仅内置来源：在已有日程的真实空档中安排必要进餐、休息或接续未完成事项；不移动已有活动，也不创建固定作息模板。',
+        json_schema_extra={'label': '空档生活调整', 'group': '生成与连续性', 'order': 1},
+    )
+    adaptive_interval_minutes: int = Field(
+        default=60, ge=10, le=1440,
+        description='两次空档调整的最短间隔，单位分钟；重启后继续沿用已保存的时间。',
+        json_schema_extra={'label': '调整最短间隔（分钟）', 'group': '生成与连续性', 'order': 2, 'depends_on': 'schedule.adaptive_enabled', 'depends_value': True},
+    )
 
     enabled: bool = Field(
         default=True,
@@ -63,8 +103,8 @@ class ScheduleSection(PluginConfigBase):
 
     inject_schedule: bool = Field(
         default=True,
-        description='允许在 Planner 决策前追加当前日程与生活背景；需要启用日程并在 allowed_streams 范围内，具体注入策略由 inject 控制。',
-        json_schema_extra={'label': '注入到 planner', 'hint': '允许在 Planner 决策前追加当前日程与生活背景；需要启用日程并在 allowed_streams 范围内，具体注入策略由 inject 控制。', 'order': 5, 'group': '注入与查询'},
+        description='允许在 Planner 决策前追加当前日程与生活背景；需要在 allowed_streams 范围内，日程关闭或没有活动时仍可提供已启用的生活状态，具体策略由 inject 控制。',
+        json_schema_extra={'label': '注入到 planner', 'hint': '按 allowed_streams 和 inject 策略提供背景；没有日程时仍可使用已启用的生活状态。', 'order': 5, 'group': '注入与查询'},
     )
     inject_into_replyer: bool = Field(
         default=True,
@@ -156,6 +196,11 @@ class ScheduleSection(PluginConfigBase):
         le=14,
         description='生成时回看最近日程的天数，范围 1–14，默认 3；用于场景连续和主题去重，不控制次日策略推断回看天数。',
         json_schema_extra={'label': '回看天数', 'hint': '生成时回看最近日程的天数，范围 1–14，默认 3；用于场景连续和主题去重，不控制次日策略推断回看天数。', 'order': 15, 'group': '生成内容'},
+    )
+    repetition_check_enabled: bool = Field(
+        default=True,
+        description='内置生成比较 recent_schedule_days 天的主要活动，高度相似时调用日程模型复核；机械重复反馈重试，起居、习惯与合理接续保留。单轮模式拒绝重复，不额外重生成。',
+        json_schema_extra={'label': '跨日内容重复检查', 'group': '生成内容', 'order': 17},
     )
 
     # 定时生成与次日策略推断，开关独立。

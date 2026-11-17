@@ -9,7 +9,7 @@ config.toml
 processed_list.json
 processed_comments.json
 cookies-*.json
-images/*
+/images/
 
 # Runtime Data
 data/
@@ -18,7 +18,31 @@ data/
 .claude/
 .pytest_cache/
 .uv-cache/
+.ruff_cache/
+.mypy_cache/
+.idea/
+.vscode/
+/.codex/
+/.agents/
+/.artifacts/
 nul
+
+# Local validation; keep files on disk, exclude them from the repository
+/tests/
+/htmlcov/
+/.coverage
+/.coverage.*
+/coverage.xml
+
+# Local environments, build outputs, logs and temporary backups
+/.venv/
+/venv/
+/build/
+/dist/
+*.egg-info/
+*.log
+*.bak
+*.backup
 
 # Local auxiliary documentation; keep repository docs in README.md
 /changelog.md

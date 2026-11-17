@@ -385,6 +385,10 @@ class ScheduleEngine:
                     "name": "处理约定" if goal.parameters.get("commitment_stream_id") else goal.name,
                     "description": "处理一件已约好的事" if goal.parameters.get("commitment_stream_id") else goal.description,
                     "goal_type": goal.goal_type, "goal_id": goal.goal_id,
+                    'record_name': goal.name, 'record_description': goal.description,
+                    'target_stream_id': str(goal.parameters.get('commitment_stream_id', '')),
+                    'continuation_id': str(goal.parameters.get('continuation_id', '')),
+                    'parameters': {'care_actions': goal.parameters.get('care_actions', [])},
                 })
         return sorted(segments, key=lambda item: (item["start"], item["end"]))
 
@@ -456,7 +460,9 @@ class ScheduleEngine:
             **schedule_config.model_dump(),
             "bot_profile": dict(self._bot_profile),
             "life_context": {key: self._life_state[key] for key in (
-                "energy", "hunger", "mood_valence", "health_note", "sleep_phase", "scene", "current_location", "environment",
+                "energy", "hunger", "thirst", "fatigue", "sleep_pressure", "hygiene_need", "discomfort",
+                "recovery_status", "menstrual_phase", "menstrual_cycle_day", "menstrual_discomfort",
+                "mood_valence", "health_note", "sleep_phase", "scene", "current_location", "environment", 'experiences',
             ) if self._life_state.get("enabled") and key in self._life_state},
             "llm_log_dir": str(self._data_dir / "llm_logs"),
         }

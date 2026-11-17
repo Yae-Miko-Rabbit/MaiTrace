@@ -16,6 +16,7 @@ import time
 from ...utils import get_logger
 from ..llm_runner import LLMRunner
 from .commands import LifeCommands
+from .continuity import ContinuityService
 from .environment import EnvironmentService
 from .memory import MemoryService
 from .models import LifeState, ScheduleSource, TextGenerator, anonymous_text, clean_text, generate_object, normalize_snapshot, required_text, stable_id
@@ -39,9 +40,12 @@ class LifeEngine:
         self.environment = EnvironmentService(self.store, plugin.config.environment, self._timezone_name)
         self.memory = MemoryService(self.store, plugin.config.life, self.generator)
         self.commands = LifeCommands(self)
+        self.continuity = ContinuityService(self)
         self._state_engine = LifeStateEngine()
         self._state_lock = asyncio.Lock()
         self._private_lock = asyncio.Lock()
+        self._experience_lock = asyncio.Lock()
+        self._report_lock = asyncio.Lock()
         self._tasks: Set[asyncio.Task[Any]] = set()
         self._started = False
         self._stopping = False
@@ -114,6 +118,7 @@ class LifeEngine:
         self._users.clear()
         self._user_memory.clear()
         self._private_tasks.clear()
+        self.continuity.records.clear()
 
     @asynccontextmanager
     async def _operation(self) -> AsyncIterator[None]:
@@ -134,6 +139,60 @@ class LifeEngine:
         async with self._operation():
             return await self.commands.execute(content, stream_id=stream_id, user_id=user_id, **kwargs)
 
+    def _check_experience_scope(self, stream_id: str, user_id: str, kwargs: Dict[str, Any]) -> None:
+        from ..schedule.utils.stream_filter import is_stream_allowed
+        if not self.plugin.config.life.outcomes_enabled:
+            raise ValueError('活动结果记录未启用')
+        if not stream_id or not user_id:
+            raise ValueError('缺少宿主提供的真实会话或调用者身份')
+        info = {'platform': kwargs.get('platform', 'qq'), 'user_id': user_id, 'group_id': kwargs.get('group_id', '')}
+        if not is_stream_allowed(stream_id, self.plugin.config.schedule.allowed_streams, info):
+            raise ValueError('当前会话未启用生活记录')
+
+    async def query_experiences(self, *, stream_id: str = '', user_id: str = '', **kwargs: Any) -> Dict[str, Any]:
+        async with self._operation():
+            self._check_experience_scope(stream_id, user_id, kwargs)
+            rows = await self.store.experiences(stream_id=stream_id)
+            for row in rows:
+                row.pop('evidence', None)
+                row.pop('history', None)
+                row.pop('actor_user_id', None)
+                row.pop('source_message_id', None)
+            return {'success': True, 'content': json.dumps(rows, ensure_ascii=False), 'data': rows}
+
+    async def record_result(self, record_id: str, status: str, result: str, evidence: str,
+                            continuation: str = '', *, stream_id: str = '', user_id: str = '', **kwargs: Any) -> Dict[str, Any]:
+        async with self._operation(), self._report_lock:
+            self._check_experience_scope(stream_id, user_id, kwargs)
+            record = await self.store.get_experience(record_id, stream_id)
+            if record is None:
+                raise ValueError('活动记录不存在或不属于当前会话')
+            if status not in {'completed', 'unfinished'} or not evidence.strip() or not result.strip() or (status == 'unfinished' and not continuation.strip()):
+                raise ValueError('必须提供有效状态、结果和用户原话；未完成时还需接续事项')
+            now = self.environment.now()
+            messages = await self.plugin.ctx.message.get_by_time_in_chat(stream_id,
+                start_time=str(now.timestamp() - 1800), end_time=str(now.timestamp()), limit=20,
+                limit_mode='latest', filter_mai=True, filter_command=True)
+            if not isinstance(messages, list):
+                raise RuntimeError('无法核对用户确认原话')
+            source = next((message for message in reversed(messages)
+                if str((message.get('message_info') or {}).get('user_info', {}).get('user_id', '')) == user_id
+                and evidence.strip() in str(message.get('processed_plain_text', ''))), None)
+            if source is None:
+                raise ValueError('用户确认原话未在当前调用者的近期真实消息中找到')
+            # 用户陈述属于当前聊天流，不能覆盖或公开传播原来的自身模拟经历。
+            original_id = record.get('source_record_id', record['id'])
+            reported_id = record['id'] if record['target_stream_id'] else stable_id('experience_report', f'{original_id}:{stream_id}')
+            prior = await self.store.get_experience(reported_id, stream_id)
+            reported = {**(prior or record), 'id': reported_id, 'source_record_id': original_id,
+                'target_stream_id': stream_id, 'source': 'reported', 'actor_user_id': user_id,
+                'source_message_id': source.get('message_id', ''), 'updated_at': now.timestamp()}
+            reported['history'] = [*(reported.get('history', [])),
+                {key: (prior or record).get(key) for key in ('source', 'status', 'result', 'updated_at')}][-10:]
+            await self.continuity.finish(reported, {'status': status, 'result': result,
+                'continuation': continuation, 'importance': 3}, now, source='reported', evidence=evidence.strip())
+            return {'success': True, 'content': '已按用户陈述保存结果，范围限于当前会话', 'record_id': reported_id}
+
 
     async def advance(self, snapshot: Any, *, now: Optional[datetime] = None) -> Dict[str, Any]:
         """由统一调度器调用。这里不请求模型、不创建日程、不发送消息。"""
@@ -147,8 +206,33 @@ class LifeEngine:
         key, expires_at = self._activity_identity(current, moment)
         if current and expires_at <= moment.timestamp():
             current, key = {}, ""
+        external = self.plugin.config.life.provider == 'maibot-community.mai-life'
+        if external:
+            from .mai_life import read_state
+            try:
+                imported = await read_state(self.plugin.ctx)
+                if moment.timestamp() - imported.last_updated_at > 3600 or imported.last_updated_at > moment.timestamp() + 60:
+                    raise ValueError('麦生活状态时间已过期或晚于当前时间')
+                self._errors.pop('provider', None)
+            except Exception as exc:
+                self._errors['provider'] = clean_text(exc, 300)
+                self._state_cache = {}
+                logger.error('麦生活状态读取失败', exc_info=True)
+                return self.peek_state()
         async with self._state_lock:
             if not self._started:
+                return self.peek_state()
+            if external:
+                forbidden = [str(user[field]) for user in self._users.values()
+                    for field in ('user_id', 'display_name') if user[field]]
+                imported.current_activity = anonymous_text(imported.current_activity, 500, forbidden)
+                imported.current_location = anonymous_text(imported.current_location, 120, forbidden)
+                imported.scene = anonymous_text(imported.scene, 500, forbidden)
+                imported.activity_key = key
+                imported.activity_kind = str(current.get('goal_type', 'other'))
+                await self.store.commit_state(imported, [])
+                self._state_cache = imported.to_dict()
+                self._environment_cache = self.environment.snapshot()
                 return self.peek_state()
             state = await self.store.get_state()
             start = datetime.fromtimestamp(max(state.last_updated_at, moment.timestamp() - self.plugin.config.life.offline_hours * 3600), tz=moment.tzinfo)
@@ -159,15 +243,16 @@ class LifeEngine:
                 # 无日程查询器的测试/外部适配，只推进两次相同快照之间确认连续的区间。
                 segments = [{"start": start, "end": moment + timedelta(microseconds=1), "goal_id": key,
                              "name": current.get("name", ""), "description": current.get("description", ""),
-                             "goal_type": current.get("goal_type", "")}]
+                             "goal_type": current.get("goal_type", ""), "parameters": current.get("parameters", {})}]
             keys = [self._state_engine.segment_key(segment) for segment in segments]
             applied = set(await self.store.applied_segments(keys))
             state, completed, wakes = self._state_engine.advance(state, moment, segments, current, applied,
-                offline_hours=self.plugin.config.life.offline_hours)
+                offline_hours=self.plugin.config.life.offline_hours, menstrual=self.plugin.config.life_menstrual)
             if state.activity_key != key:
                 state.scene = ""
             state.activity_key = key
-            await self.store.commit_state(state, completed, wakes=wakes, day=moment.date().isoformat())
+            records = self.continuity.pending(segments, completed, moment) if self.plugin.config.life.outcomes_enabled else []
+            await self.store.commit_state(state, completed, wakes=wakes, day=moment.date().isoformat(), experiences=records)
             self._state_cache = state.to_dict()
             self._environment_cache = self.environment.snapshot()
         return self.peek_state()
@@ -196,7 +281,14 @@ class LifeEngine:
 
     def peek_state(self) -> Dict[str, Any]:
         """纯内存快照，不含私人日记、用户身份或原始群聊。"""
-        return {**deepcopy(self._state_cache), "enabled": self._started and self.plugin.config.life.enabled,
+        state = deepcopy(self._state_cache)
+        if self.plugin.config.life.provider != 'internal':
+            # 麦生活尚未提供这些字段，不能把 dataclass 默认值冒充外部真实状态。
+            for key in ("thirst", "fatigue", "sleep_pressure", "hygiene_need", "discomfort", "recovery_status",
+                        "menstrual_phase", "menstrual_cycle_day", "menstrual_discomfort"):
+                state.pop(key, None)
+        return {**state, "enabled": self._started and bool(self._state_cache) and self.plugin.config.life.enabled,
+                'provider': self.plugin.config.life.provider, 'experiences': self.continuity.peek(),
                 "environment": deepcopy(self._environment_cache), "errors": dict(self._errors)}
 
     def environment_snapshot(self) -> Dict[str, Any]:
@@ -221,7 +313,8 @@ class LifeEngine:
         user = self._users.get(str(user_id))
         if user is None or not user["enabled"]:
             return {}
-        return {"life": self.peek_state(), "memory": deepcopy(self._user_memory.get(str(user_id), {}))}
+        return {"life": self.peek_state(), "memory": {**deepcopy(self._user_memory.get(str(user_id), {})),
+                'experiences': self.continuity.peek(str(user['stream_id']))}}
 
     async def claim_public_opportunity(self, *, consumer: str = "qzone", lease_seconds: Optional[int] = None) -> Optional[Dict[str, Any]]:
         if not self._started or self._stopping:
@@ -280,6 +373,8 @@ class LifeEngine:
         await self._refresh_users(now)
 
     async def mark_woken(self, *, minutes: int) -> None:
+        if self.plugin.config.life.provider != 'internal':
+            raise ValueError('麦生活接管睡眠状态，MaiTrace 不写入唤醒状态')
         if not self._started:
             return
         async with self._state_lock:
@@ -299,15 +394,27 @@ class LifeEngine:
 
     async def _refresh_views(self, now: datetime) -> None:
         async with self._state_lock:
-            self._state_cache = (await self.store.get_state()).to_dict()
+            if self.plugin.config.life.provider == 'internal':
+                self._state_cache = (await self.store.get_state()).to_dict()
             self._environment_cache = self.environment.snapshot()
         await self._refresh_users(now)
+        await self.continuity.refresh()
 
     async def _scene(self, now: datetime) -> None:
         state = self.peek_state()
         activity = deepcopy(self._latest_snapshot.get("activity"))
         key = str(state.get("activity_key", ""))
         if not self.plugin.config.life.scene_enabled or not key or not state.get("current_activity"):
+            return
+        if self.plugin.config.life.provider != 'internal':
+            # 复用麦生活的场景，不请求第二次模型；发布只使用去身份后的自身背景。
+            scene = anonymous_text(state.get('scene', ''), 500,
+                [str(user[field]) for user in self._users.values() for field in ('user_id', 'display_name') if user[field]])
+            if scene and state.get('activity_kind') != 'sleep' and state.get('sleep_phase') in {'awake', 'woken'}:
+                await self.store.put_scene(key, now.date().isoformat(), state['current_activity'], scene, now.timestamp(),
+                    opportunity={'source': 'scene', 'source_key': key, 'topic': scene[:240], 'motive': '分享正在经历的日常',
+                        'privacy': 'public', 'now': now.timestamp(), 'expires_at': self._activity_identity(activity, now)[1],
+                        'payload': {'scene': scene, 'provider': self.plugin.config.life.provider}})
             return
         existing = await self.store.get_scene(key)
         if existing is None:
@@ -316,7 +423,12 @@ class LifeEngine:
             response = await generate_object(self.generator,
                 "只细化下列已存在的当前日程场景，不新增日程、人物或重大事件，不改写精力心情数值。"
                 "结合角色习惯、真实精力和饥饿写一两个具体小细节；写正在做的事，不把计划写成已经完成。"
+                "参考近期场景和活动结果，熟悉的习惯、地点和物品可以持续出现；"
+                "近期已经写过的细节没有新变化时可以省略，不反复套用相同句式或每天创造新鲜感。"
+                "平常的一段生活也正常，缺少具体分享理由时 shareable=false，不强行提炼人生感悟。"
                 "不编造天气，不用统一的可爱语气覆盖人设，不强行表现兴奋。"
+                "身体感受依据下列状态，不编造疾病、突然痊愈或必然痛经；疲惫和恢复可以平淡地体现。"
+                "经期照护或洗漱本身不构成公开分享理由，避免主动公开私密身体细节。"
                 "禁止出现真实用户身份、群号或私人约定，无法去身份的场景应 shareable=false。"
                 "返回 JSON：scene（短场景）、topic（可公开的生活话题）、motive（分享动机）、shareable（布尔）。\n"
                 + json.dumps({"activity": state["current_activity"],
@@ -325,6 +437,12 @@ class LifeEngine:
                     "description": activity.get("description", "") if isinstance(activity, dict) else "",
                     "scene_hint": activity.get("parameters", {}).get("scene_hint", "") if isinstance(activity, dict) else "",
                     "energy": state["energy"], "hunger": state["hunger"], "mood": state["mood_valence"],
+                    "body": {field: state[field] for field in (
+                        "thirst", "fatigue", "sleep_pressure", "hygiene_need", "discomfort", "recovery_status",
+                        "health_note", "menstrual_phase", "menstrual_discomfort",
+                    ) if field in state},
+                    'recent_scenes': await self.store.recent_scenes(now.timestamp(), exclude_key=key),
+                    'recent_results': self.continuity.public_context(),
                     "environment": state["environment"]}, ensure_ascii=False))
             forbidden = [str(user[field]) for user in self._users.values() for field in ("user_id", "display_name") if user[field]]
             scene = anonymous_text(required_text(response.get("scene"), "scene", 500), 500, forbidden)
@@ -358,6 +476,7 @@ class LifeEngine:
             now = self.environment.now()
             steps = [
                 ("scene", lambda: self._scene(now)),
+                ('outcomes', lambda: self.continuity.process(now)),
                 ("dream", lambda: self.memory.dreams(now)),
                 ("diary", lambda: self.memory.diary(now)),
                 ("dates", lambda: self.memory.important_dates(now)),

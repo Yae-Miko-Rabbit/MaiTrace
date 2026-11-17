@@ -41,7 +41,7 @@ from ..commitments import (
     DEFAULT_DURATION_MINUTES, CommitmentConflictError, free_windows,
     validate_commitment_date, validate_duration,
 )
-from ..utils.time_utils import parse_time_window
+from ..utils.time_utils import format_minutes_to_time, parse_time_window
 from ..utils.timezone_manager import TimezoneManager
 
 logger = logging.getLogger(__name__)
@@ -308,9 +308,9 @@ class Goal:
         # 显示时间窗口
         time_window = self.parameters.get("time_window") if self.parameters else None
         if time_window and isinstance(time_window, list) and len(time_window) == 2:
-            start_h, start_m = divmod(time_window[0], 60)
-            end_h, end_m = divmod(time_window[1], 60)
-            lines.append(f"   时间: {start_h:02d}:{start_m:02d}-{end_h:02d}:{end_m:02d}")
+            start_time = format_minutes_to_time(time_window[0])
+            end_time = format_minutes_to_time(time_window[1])
+            lines.append(f"   时间: {start_time}-{end_time}")
 
         return "\n".join(lines)
 

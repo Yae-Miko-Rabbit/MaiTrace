@@ -25,8 +25,9 @@ from maibot_sdk import (
 )
 from maibot_sdk.types import HookMode, HookOrder, ToolParameterInfo, ToolParamType
 
-from .config import MaiTracePluginConfig
+from .config import MaiTracePluginConfig, migrate_ui_sections_config
 from .config.migration import migrate_legacy_config, rebuild_upgrade_config
+from .config.ui import build_friendly_config_schema
 from .services.persistence import PluginPersistence, queue_legacy_config_archive
 from .utils import get_logger
 
@@ -106,8 +107,9 @@ class MaiTracePlugin(MaiBotPlugin):
                 data_dir = self.ctx.paths.data_dir if self._ctx is not None else self.plugin_dir / "data"
                 self._legacy_config_archive = queue_legacy_config_archive(data_dir, raw_config)
             self._legacy_config_snapshot = raw_config
-            migrated, changed = migrate_legacy_config(source)
-            if changed:
+            ui_migrated, ui_changed = migrate_ui_sections_config(source)
+            migrated, changed = migrate_legacy_config(ui_migrated)
+            if changed or ui_changed:
                 # 当前 Host 先按默认结构删除废弃字段，再调用 normalize_plugin_config。
                 # 只对与这份磁盘配置重建结果完全一致的输入应用快照，避免覆盖 WebUI 编辑。
                 self._pending_config_upgrade = (
@@ -115,6 +117,16 @@ class MaiTracePlugin(MaiBotPlugin):
                     rebuild_upgrade_config(defaults, migrated),
                 )
         return defaults
+
+    def get_webui_config_schema(
+        self, *, plugin_id: str = '', plugin_name: str = '', plugin_version: str = '',
+        plugin_description: str = '', plugin_author: str = '',
+    ) -> Dict[str, Any]:
+        schema = super().get_webui_config_schema(
+            plugin_id=plugin_id, plugin_name=plugin_name, plugin_version=plugin_version,
+            plugin_description=plugin_description, plugin_author=plugin_author,
+        )
+        return build_friendly_config_schema(schema)
 
     def normalize_plugin_config(
         self,
@@ -126,7 +138,8 @@ class MaiTracePlugin(MaiBotPlugin):
         if self._pending_config_upgrade is not None and source == self._pending_config_upgrade[0]:
             raw = self._pending_config_upgrade[1]
             self._pending_config_upgrade = None
-        migrated, _ = migrate_legacy_config(raw)
+        ui_migrated, _ = migrate_ui_sections_config(raw)
+        migrated, _ = migrate_legacy_config(ui_migrated)
         normalized, changed = super().normalize_plugin_config(migrated)
         normalized["plugin"]["config_version"] = self.build_default_config()["plugin"]["config_version"]
         return normalized, changed or normalized != source
@@ -144,7 +157,8 @@ class MaiTracePlugin(MaiBotPlugin):
         schedule = self.config.schedule
         rounds = schedule.max_rounds if schedule.use_multi_round else 1
         # 角色裁判与生成前状态推断也会请求模型，每一轮都有自己的 RPC 预算。
-        schedule_seconds = (rounds + 2) * (schedule.generation_timeout + 10) + 120
+        calls = rounds * (2 if schedule.repetition_check_enabled else 1) + 2
+        schedule_seconds = calls * (schedule.generation_timeout + 10) + 120
         for component in components:
             if component["name"] in ("zn", "send_feed", "publish_topic_api"):
                 component["metadata"]["timeout_ms"] = int(max(
@@ -167,6 +181,7 @@ class MaiTracePlugin(MaiBotPlugin):
             self.config.read.read_number,
             self.config.schedule.generation_timeout, self.config.schedule.use_multi_round,
             self.config.schedule.max_rounds,
+            self.config.schedule.repetition_check_enabled,
         )
 
     # ===== 生命周期 =====
@@ -194,7 +209,7 @@ class MaiTracePlugin(MaiBotPlugin):
         from .services.runtime import start_runtime
         async with self._runtime_lock:
             await start_runtime(self)
-        self.ctx.logger.info("MaiTrace 6.2 已加载：每日作息、生活与空间服务已就绪")
+        self.ctx.logger.info("MaiTrace 6.7.4 已加载：每日作息、生活与空间服务已就绪")
 
     async def on_unload(self) -> None:
         from .services.runtime import stop_runtime
@@ -303,6 +318,30 @@ class MaiTracePlugin(MaiBotPlugin):
     async def handle_recall_qzone_activity(self, **kwargs: Any) -> Dict[str, Any]:
         from .handlers.actions import execute_recall_qzone_activity
         return await execute_recall_qzone_activity(self, **kwargs)
+
+    @Tool('query_life_experiences', description='查询自身活动结果及当前会话的待确认约定；返回记录 ID、来源与未完成事项。', parameters=[])
+    async def handle_query_life_experiences(self, **kwargs: Any) -> Dict[str, Any]:
+        if self.life_engine is None:
+            return _tool_error('生活服务未启用')
+        try:
+            return await self.life_engine.query_experiences(**kwargs)
+        except (ValueError, RuntimeError) as exc:
+            return _tool_error(str(exc))
+
+    @Tool('record_life_outcome', description='仅在用户明确说明活动完成情况后记录结果；先查询记录 ID，evidence 必须引用当前调用者的真实原话。未完成时保存待接续事项。', parameters=[
+        ToolParameterInfo(name='record_id', param_type=ToolParamType.STRING, description='查询到的活动记录 ID', required=True),
+        ToolParameterInfo(name='status', param_type=ToolParamType.STRING, description='completed 或 unfinished', required=True),
+        ToolParameterInfo(name='result', param_type=ToolParamType.STRING, description='用户明确说明的实际结果', required=True),
+        ToolParameterInfo(name='evidence', param_type=ToolParamType.STRING, description='当前调用者说明完成情况的原话', required=True),
+        ToolParameterInfo(name='continuation', param_type=ToolParamType.STRING, description='未完成时需要接续的事项', required=False),
+    ])
+    async def handle_record_life_outcome(self, **kwargs: Any) -> Dict[str, Any]:
+        if self.life_engine is None:
+            return _tool_error('生活服务未启用')
+        try:
+            return await self.life_engine.record_result(**kwargs)
+        except (ValueError, RuntimeError) as exc:
+            return _tool_error(str(exc))
 
     @API(
         "send_feed_api",
@@ -431,8 +470,9 @@ class MaiTracePlugin(MaiBotPlugin):
         start = datetime.combine(date, datetime.min.time(), tzinfo=now.tzinfo)
         segments = await self._schedule_engine.activity_segments(start, start + timedelta(days=1))
         # RPC 载荷只包含可序列化值，时区信息保留在 ISO 时间中。
+        public_fields = {'start', 'end', 'name', 'description', 'goal_type', 'goal_id'}
         return [{key: value.isoformat() if isinstance(value, datetime) else value
-                 for key, value in segment.items()} for segment in segments]
+                 for key, value in segment.items() if key in public_fields} for segment in segments]
 
     @API("get_life_state", description="获取精力、心情与睡眠等全局生活状态", public=True, timeout_ms=10000)
     async def handle_get_life_state(self, **kwargs: Any) -> Dict[str, Any]:
